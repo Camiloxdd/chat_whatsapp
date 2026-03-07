@@ -75,7 +75,7 @@ ${mensaje}
 `
 
 const res = await axios.post("http://127.0.0.1:11434/api/generate",{
-model:"phi3",
+model:"gemma:2b",
 prompt:prompt,
 stream:false
 })
