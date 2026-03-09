@@ -1,90 +1,188 @@
+const Groq = require("groq-sdk")
 const axios = require("axios")
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } = require("@whiskeysockets/baileys")
+require('dotenv').config();
+
+const {
+default: makeWASocket,
+useMultiFileAuthState,
+fetchLatestBaileysVersion,
+DisconnectReason
+} = require("@whiskeysockets/baileys")
+
 const { Boom } = require("@hapi/boom")
 const qrcode = require("qrcode-terminal")
 
-const clientes = {}
-
 /* ===============================
-   FUNCION PARA HABLAR CON OLLAMA
+CONFIG
 =================================*/
 
-async function preguntarIA(mensaje){
+const WEBHOOK_N8N = "http://35.208.239.55:5678/webhook/whatsapp"
 
-const prompt = `
-Eres Pizzy, el asistente virtual súper amigable de Pizzarra a la Piedra 🍕🔥, el lugar #1 de pizzas a la piedra en Madrid, Cundinamarca.
-
-Hablas 100% en español colombiano, cercano y amable.
-
-Usa expresiones como:
-¡veci!
-¡qué chimba!
-listo mi rey / mi reina
-volando te llega
-¡qué antojo!
-
-Usa emojis 🍕🔥😊🚀
-
-⚠️ REGLA MUY IMPORTANTE:
-NUNCA uses "parce" ni "parcero". Solo usa "veci".
-
-👋 SALUDO
-
-Cuando alguien escriba por primera vez di:
-
-"¡Holaaa! Bienvenido a Pizzarra a la Piedra 🍕🔥
-Soy Pizzy, tu asistente pizzero 😎
-¿Qué se te antoja hoy, veci?"
-
-📋 MENÚ
-
-Si el cliente pide menú envía:
-
-https://wa.me/c/573001034070
-
-Ejemplo:
-
-"¡Claro que sí, veci! 🍕
-Aquí puedes ver todo nuestro menú completico:
-
-https://wa.me/c/573001034070
-
-Mira qué pizza te antoja y te ayudo con el pedido 🔥"
-
-🎯 OBJETIVO
-
-Ayudar a tomar pedidos de pizza para domicilio.
-
-Debes preguntar:
-
-tamaño  
-sabores  
-dirección  
-barrio  
-
-Tiempo de entrega:
-45 a 60 minutos.
-
-Domicilio:
-entre $5.000 y $10.000 según barrio.
-
-⚠️ No inventes precios ni productos.
-
-Mensaje del cliente:
-${mensaje}
-`
-
-const res = await axios.post("http://127.0.0.1:11434/api/generate",{
-model:"gemma:2b",
-prompt:prompt,
-stream:false
+const groq = new Groq({
+apiKey: process.env.GROQ_API_KEY
 })
 
-return res.data.response
+/* ===============================
+MEMORIA Y CONTROL
+=================================*/
+
+const conversaciones = {}
+const mensajesProcesados = new Set()
+const buffers = {}
+
+/* ===============================
+IA FALLBACK
+=================================*/
+
+async function preguntarIA(phone, mensaje){
+
+if(!conversaciones[phone]){
+conversaciones[phone] = []
+}
+
+conversaciones[phone].push({
+role:"user",
+content:mensaje
+})
+
+const prompt = `
+Eres Pizzy, el asistente virtual de Pizzarra a la Piedra 🍕.
+
+Hablas siempre en español colombiano cercano, amable y natural. Usas algunos emojis para que el mensaje sea cálido y amigable 😊🔥🍕.
+
+SALUDO INICIAL (MUY IMPORTANTE)
+
+Cuando un cliente escriba por primera vez, debes saludar con un mensaje corto, claro y bien estructurado, con espacios entre líneas para que se vea limpio en WhatsApp.
+
+El saludo debe decir claramente que eres Pizzy y que eres el asistente virtual de Pizzarra a la Piedra.
+
+Nunca digas frases como:
+"Eres asistente de..."
+"Soy eres..."
+ni estructuras incorrectas.
+
+Debes presentarte así:
+
+"Hola, soy Pizzy, el asistente virtual de Pizzarra a la Piedra."
+
+Luego explica brevemente que estás para ayudar a escoger el pedido.
+
+Después invita al cliente a pedir algo.
+
+El mensaje debe:
+
+- Ser corto
+- Amigable
+- Tener emojis
+- Estar bien separado por líneas
+- Invitar a pedir comida
+
+Estructura obligatoria del saludo:
+
+1. Saludo amigable
+2. Presentación como Pizzy
+3. Explicación corta de ayuda
+4. Invitación a pedir
+
+Ejemplo del estilo esperado:
+
+¡Hola! 🍕😊
+
+Soy Pizzy, el asistente virtual de Pizzarra a la Piedra.  
+Estoy aquí para ayudarte a escoger tu pedido.
+
+¿En qué puedo ayudarte hoy? ¿Quieres ver el menú o ya sabes qué te gustaría pedir? 😋
+
+REGLAS IMPORTANTES
+
+- No escribas mensajes largos.
+- No repitas el saludo si la conversación ya comenzó.
+- Usa un tono cercano y amigable.
+- Mantén los mensajes claros y fáciles de leer en WhatsApp.
+
+Si el cliente pide menú envía:
+https://wa.me/c/573001034070
+
+No repitas el saludo si ya saludaste antes.
+`
+
+const mensajes = [
+{ role:"system", content:prompt },
+...conversaciones[phone]
+]
+
+const chat = await groq.chat.completions.create({
+messages: mensajes,
+model: "llama-3.1-8b-instant"
+})
+
+const respuesta = chat.choices[0].message.content
+
+conversaciones[phone].push({
+role:"assistant",
+content:respuesta
+})
+
+return respuesta
 }
 
 /* ===============================
-   BOT DE WHATSAPP
+ENVIAR A N8N
+=================================*/
+
+async function enviarAN8N(phone, mensaje){
+
+try{
+
+const res = await axios.post(WEBHOOK_N8N,{
+phone,
+message:mensaje
+})
+
+return res.data.reply
+
+}catch(e){
+
+console.log("⚠️ n8n no respondió")
+
+return null
+
+}
+
+}
+
+/* ===============================
+AGRUPAR MENSAJES
+=================================*/
+
+function bufferMensaje(phone, texto){
+
+return new Promise(resolve=>{
+
+if(!buffers[phone]){
+buffers[phone] = []
+}
+
+buffers[phone].push(texto)
+
+clearTimeout(buffers[phone].timer)
+
+buffers[phone].timer = setTimeout(()=>{
+
+const mensajeFinal = buffers[phone].join(" ")
+
+buffers[phone] = []
+
+resolve(mensajeFinal)
+
+},1500)
+
+})
+
+}
+
+/* ===============================
+BOT WHATSAPP
 =================================*/
 
 async function startBot(){
@@ -100,10 +198,10 @@ auth: state
 sock.ev.on("creds.update", saveCreds)
 
 /* ===============================
-   CONEXION
+CONEXION
 =================================*/
 
-sock.ev.on("connection.update", (update)=>{
+sock.ev.on("connection.update",(update)=>{
 
 const { connection, lastDisconnect, qr } = update
 
@@ -129,39 +227,63 @@ console.log("🤖 BOT CONECTADO A WHATSAPP")
 })
 
 /* ===============================
-   MENSAJES
+MENSAJES
 =================================*/
 
-sock.ev.on("messages.upsert", async ({ messages })=>{
+sock.ev.on("messages.upsert", async ({ messages, type })=>{
+
+if(type !== "notify") return
 
 const msg = messages[0]
 
 if(!msg.message) return
 if(msg.key.fromMe) return
+if(msg.key.remoteJid === "status@broadcast") return
+
+const msgId = msg.key.id
+
+if(mensajesProcesados.has(msgId)) return
+mensajesProcesados.add(msgId)
 
 const from = msg.key.remoteJid
 
 const text =
-msg.message.conversation ||
-msg.message.extendedTextMessage?.text ||
+msg.message?.conversation ||
+msg.message?.extendedTextMessage?.text ||
+msg.message?.imageMessage?.caption ||
+msg.message?.videoMessage?.caption ||
 ""
 
-const message = text.toLowerCase()
+if(!text || text.trim().length === 0) return
 
 try{
 
-const respuestaIA = await preguntarIA(message)
+/* AGRUPAR MENSAJES */
+
+const mensaje = await bufferMensaje(from, text)
+
+/* ENVIAR A N8N */
+
+let respuesta = await enviarAN8N(from, mensaje)
+
+/* SI N8N FALLA USA IA */
+
+if(!respuesta){
+respuesta = await preguntarIA(from, mensaje)
+}
+
+/* RESPONDER */
 
 await sock.sendMessage(from,{
-text: respuestaIA
+text: respuesta
 })
 
 }catch(e){
 
-console.log(e)
+console.log("ERROR:", e)
 
 await sock.sendMessage(from,{
-text:"⚠️ Veci hubo un error con la IA"
+text:"⚠️ Hubo un error procesando tu mensaje"
 })
 
 }
